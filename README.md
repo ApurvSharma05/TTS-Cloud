@@ -1,4 +1,4 @@
-# 📚 Talk-to-Syllabus RAG
+#  Talk-to-Syllabus RAG
 
 A free-tier RAG app: upload a syllabus PDF, ask questions, get AI answers.
 
