@@ -15,14 +15,16 @@ from groq import Groq
 # ─── Load Environment Variables ──────────────────────────────────────────────
 load_dotenv()
 
-PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-PINECONE_INDEX_NAME = os.getenv("PINECONE_INDEX_NAME", "syllabus-rag")
-
-if not PINECONE_API_KEY:
-    raise ValueError("❌ PINECONE_API_KEY not found in .env file")
-if not GROQ_API_KEY:
-    raise ValueError("❌ GROQ_API_KEY not found in .env file")
+def get_keys():
+    """Read API keys from environment (supports .env locally and env vars on Render)."""
+    pinecone_key = os.getenv("PINECONE_API_KEY")
+    groq_key = os.getenv("GROQ_API_KEY")
+    index_name = os.getenv("PINECONE_INDEX_NAME", "syllabus-rag")
+    if not pinecone_key:
+        raise ValueError("❌ PINECONE_API_KEY not set. Add it to .env or set as environment variable.")
+    if not groq_key:
+        raise ValueError("❌ GROQ_API_KEY not set. Add it to .env or set as environment variable.")
+    return pinecone_key, groq_key, index_name
 
 # ─── Embedding Model ─────────────────────────────────────────────────────────
 _embedder = None
@@ -34,9 +36,12 @@ def get_embedder():
     return _embedder
 
 # ─── Pinecone Setup ─────────────────────────────────────────────────────────
-def init_pinecone(index_name: str = PINECONE_INDEX_NAME) -> Pinecone.Index:
+def init_pinecone(index_name: str = None) -> Pinecone.Index:
     """Auto-initializes Pinecone index."""
-    pc = Pinecone(api_key=PINECONE_API_KEY)
+    pinecone_key, _, default_index = get_keys()
+    if index_name is None:
+        index_name = default_index
+    pc = Pinecone(api_key=pinecone_key)
     existing = [idx.name for idx in pc.list_indexes()]
     if index_name not in existing:
         pc.create_index(
@@ -67,7 +72,7 @@ def chunk_text(text: str, chunk_size: int = 500, overlap: int = 100) -> List[str
         if last_period > chunk_size // 2:
             chunk = chunk[:last_period + 1]
         chunks.append(chunk.strip())
-        start += len(chunk) - overlap
+        start += max(len(chunk) - overlap, 1)  # Guarantee forward progress
     return [c for c in chunks if len(c) > 50]
 
 def process_pdf(pdf_bytes: bytes) -> int:
@@ -118,7 +123,8 @@ Student Question: {question}
 
 Answer based on the syllabus context above:"""
     
-    client = Groq(api_key=GROQ_API_KEY)
+    _, groq_key, _ = get_keys()
+    client = Groq(api_key=groq_key)
     response = client.chat.completions.create(
         model="llama-3.1-8b-instant",  # ✅ FIXED: Current working model
         messages=[

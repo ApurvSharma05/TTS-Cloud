@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: talk-to-syllabus
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true
+    envVars:
+      - key: PINECONE_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: PINECONE_INDEX_NAME
+        value: syllabus-rag
+      - key: PYTHON_VERSION
+        value: "3.11.9"
