@@ -261,10 +261,11 @@ with st.sidebar:
     st.divider()
 
     # RAG Settings & Architecture Specs
+    rag_cfg = RAGSettings()
     with st.expander("🛠️ RAG Pipeline Specs", expanded=False):
         st.markdown(f"""
         - **Embedding Model:** `all-MiniLM-L6-v2` (384-dim)
-        - **LLM Generator:** `llama-3.1-8b-instant`
+        - **LLM Generator:** `{rag_cfg.GROQ_MODEL_NAME}`
         - **Retrieval:** Hybrid (Dense Cosine + Sparse BM25)
         - **Fusion:** Reciprocal Rank Fusion (RRF $k=60$)
         - **Chunk Size:** 600 chars (Unit & Page Aware)
@@ -350,7 +351,7 @@ st.markdown("""
         Intelligent Academic RAG System with Unit-Aware Chunking, Hybrid BM25+Pinecone Retrieval, Exact Citations & Guardrails.
     </div>
     <div style="margin-top: 14px;">
-        <span class="badge-tech">⚡ Groq Llama-3.1</span>
+        <span class="badge-tech">⚡ Groq Fast Inference</span>
         <span class="badge-tech">🌲 Pinecone Vector DB</span>
         <span class="badge-tech">🔍 Hybrid BM25 + RRF</span>
         <span class="badge-tech">🎯 Unit & Page Aware</span>

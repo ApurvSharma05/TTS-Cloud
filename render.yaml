@@ -13,6 +13,6 @@ services:
       - key: PINECONE_INDEX_NAME
         value: syllabus-rag
       - key: GROQ_MODEL
-        value: llama-3.1-8b-instant
+        value: groq/compound-mini
       - key: PYTHON_VERSION
         value: "3.11.9"

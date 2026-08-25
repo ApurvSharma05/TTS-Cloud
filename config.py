@@ -25,8 +25,8 @@ class RAGSettings:
     EMBEDDING_MODEL_NAME: str = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
     
     # Generation Model (Groq)
-    GROQ_MODEL_NAME: str = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
-    GROQ_REFORMULATION_MODEL: str = os.getenv("GROQ_REFORMULATION_MODEL", "llama-3.1-8b-instant")
+    GROQ_MODEL_NAME: str = os.getenv("GROQ_MODEL", "groq/compound-mini")
+    GROQ_REFORMULATION_MODEL: str = os.getenv("GROQ_REFORMULATION_MODEL", "groq/compound-mini")
     DEFAULT_TEMPERATURE: float = 0.2
     MAX_OUTPUT_TOKENS: int = 768
     
