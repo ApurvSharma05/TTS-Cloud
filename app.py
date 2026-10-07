@@ -356,6 +356,7 @@ st.markdown("""
         <span class="badge-tech">🔍 Hybrid BM25 + RRF</span>
         <span class="badge-tech">🎯 Unit & Page Aware</span>
         <span class="badge-tech">🛡️ Strict Guardrails</span>
+        <span class="badge-tech">🚀 FastAPI Layer (/docs)</span>
     </div>
 </div>
 """, unsafe_allow_html=True)

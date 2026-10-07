@@ -1,5 +1,7 @@
 [server]
 headless = true
+# CORS and XSRF toggles for local Dev Container / Codespaces port forwarding.
+# For public Internet production deployments, set enableCORS = true and enableXsrfProtection = true.
 enableCORS = false
 enableXsrfProtection = false
 

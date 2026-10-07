@@ -3,8 +3,10 @@ retriever.py - Hybrid Retrieval Engine with Dense Pinecone Vector Search,
 BM25 Lexical Keyword Matching, Reciprocal Rank Fusion (RRF), and Candidate Reranking.
 """
 
+import logging
 import math
 import re
+import threading
 import time
 from collections import Counter
 from dataclasses import dataclass
@@ -16,6 +18,8 @@ from pinecone import Pinecone, ServerlessSpec
 
 from config import RAGSettings, get_api_keys
 from document_processor import SyllabusChunk
+
+logger = logging.getLogger("tts-cloud.retriever")
 
 
 @dataclass
@@ -107,6 +111,7 @@ class SyllabusRetriever:
         self.index_name = index_name or default_idx
         self._pinecone_client = None
         self._index = None
+        self._lock = threading.Lock()
         self._corpus_cache: List[Dict[str, Any]] = []
         self._corpus_embeddings: Optional[np.ndarray] = None
         self._bm25_model: Optional[BM25Okapi] = None
@@ -115,6 +120,7 @@ class SyllabusRetriever:
     def get_embedder(cls) -> SentenceTransformer:
         """Lazy singleton loader for HuggingFace SentenceTransformer."""
         if cls._embedder_instance is None:
+            logger.info("Loading SentenceTransformer model: %s", RAGSettings.EMBEDDING_MODEL_NAME)
             cls._embedder_instance = SentenceTransformer(RAGSettings.EMBEDDING_MODEL_NAME)
         return cls._embedder_instance
 
@@ -177,20 +183,22 @@ class SyllabusRetriever:
                 index.upsert(vectors=batch)
                 if progress_callback:
                     progress_callback(min(1.0, (b_idx // batch_size + 1) / total_batches))
+            logger.info("Successfully indexed %d chunks into Pinecone index '%s'.", len(chunks), self.index_name)
         except Exception as e:
-            # If Pinecone is temporarily unavailable or in local mock mode, proceed with cache
-            pass
+            logger.warning("Pinecone upsert skipped or offline (%s). Retaining chunks in local memory cache.", e)
 
-        # Update in-memory corpus & embeddings cache
-        for chunk in chunks:
-            self._corpus_cache.append(chunk.to_metadata())
-        
-        if self._corpus_embeddings is None:
-            self._corpus_embeddings = embeddings
-        else:
-            self._corpus_embeddings = np.vstack([self._corpus_embeddings, embeddings])
+        # Thread-safe update of in-memory corpus & embeddings cache
+        with self._lock:
+            for chunk in chunks:
+                self._corpus_cache.append(chunk.to_metadata())
+            
+            if self._corpus_embeddings is None:
+                self._corpus_embeddings = embeddings
+            else:
+                self._corpus_embeddings = np.vstack([self._corpus_embeddings, embeddings])
 
-        self._rebuild_bm25()
+            self._rebuild_bm25()
+
         return len(chunks)
 
     def _rebuild_bm25(self):
@@ -207,24 +215,27 @@ class SyllabusRetriever:
             if self.api_key:
                 index = self._get_pinecone_index()
                 index.delete(filter={"document_id": {"$eq": document_id}})
-        except Exception:
-            pass
+                logger.info("Deleted document '%s' vectors from Pinecone.", document_id)
+        except Exception as e:
+            logger.warning("Pinecone deletion skipped or failed: %s", e)
 
-        # Remove from local cache
-        remaining_cache = []
-        indices_to_keep = []
-        for i, c in enumerate(self._corpus_cache):
-            if c.get("document_id") != document_id:
-                remaining_cache.append(c)
-                indices_to_keep.append(i)
+        # Thread-safe removal from local cache
+        with self._lock:
+            remaining_cache = []
+            indices_to_keep = []
+            for i, c in enumerate(self._corpus_cache):
+                if c.get("document_id") != document_id:
+                    remaining_cache.append(c)
+                    indices_to_keep.append(i)
 
-        self._corpus_cache = remaining_cache
-        if self._corpus_embeddings is not None and len(indices_to_keep) > 0:
-            self._corpus_embeddings = self._corpus_embeddings[indices_to_keep]
-        else:
-            self._corpus_embeddings = None
+            self._corpus_cache = remaining_cache
+            if self._corpus_embeddings is not None and len(indices_to_keep) > 0:
+                self._corpus_embeddings = self._corpus_embeddings[indices_to_keep]
+            else:
+                self._corpus_embeddings = None
 
-        self._rebuild_bm25()
+            self._rebuild_bm25()
+
         return True
 
     def hybrid_search(

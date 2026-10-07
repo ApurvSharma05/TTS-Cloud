@@ -3,12 +3,25 @@ config.py - Centralized configuration for Talk-to-Syllabus (TTS-Cloud) RAG Syste
 Handles environment variables, model parameters, retrieval thresholds, and index settings.
 """
 
+import logging
 import os
 from dataclasses import dataclass
+from typing import Tuple
 from dotenv import load_dotenv
 
 # Load local .env file if available
 load_dotenv()
+
+def setup_logging(level: int = logging.INFO) -> logging.Logger:
+    """Configures structured application logging across the TTS-Cloud system."""
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s | %(levelname)-7s | %(name)s:%(lineno)d | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+    return logging.getLogger("tts-cloud")
+
+logger = setup_logging()
 
 @dataclass(frozen=True)
 class RAGSettings:
@@ -25,8 +38,15 @@ class RAGSettings:
     EMBEDDING_MODEL_NAME: str = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
     
     # Generation Model (Groq)
-    GROQ_MODEL_NAME: str = os.getenv("GROQ_MODEL", "groq/compound-mini")
-    GROQ_REFORMULATION_MODEL: str = os.getenv("GROQ_REFORMULATION_MODEL", "groq/compound-mini")
+    # Default to qwen/qwen3.8-27b or llama-3.1-8b-instant with automated fallback
+    GROQ_MODEL_NAME: str = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")
+    GROQ_REFORMULATION_MODEL: str = os.getenv("GROQ_REFORMULATION_MODEL", "qwen/qwen3.8-27b")
+    FALLBACK_MODELS: Tuple[str, ...] = (
+        "qwen/qwen3.8-27b",
+        "llama-3.1-8b-instant",
+        "llama-3.3-70b-versatile",
+        "openai/gpt-oss-120b"
+    )
     DEFAULT_TEMPERATURE: float = 0.2
     MAX_OUTPUT_TOKENS: int = 768
     
@@ -45,7 +65,7 @@ class RAGSettings:
     MAX_HISTORY_TURNS: int = 4   # Last N user/assistant message pairs to consider for reformulation
 
 
-def get_api_keys() -> tuple[str, str, str]:
+def get_api_keys() -> Tuple[str, str, str]:
     """
     Retrieve API keys with validation.
     Returns:

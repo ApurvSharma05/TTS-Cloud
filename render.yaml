@@ -13,6 +13,6 @@ services:
       - key: PINECONE_INDEX_NAME
         value: syllabus-rag
       - key: GROQ_MODEL
-        value: groq/compound-mini
+        value: qwen/qwen3.8-27b
       - key: PYTHON_VERSION
         value: "3.11.9"

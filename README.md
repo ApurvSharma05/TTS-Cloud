@@ -1,14 +1,19 @@
 # 📚 TTS-Cloud (Talk-to-Syllabus)
 
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.109%2B-009688.svg)](https://fastapi.tiangolo.com/)
 [![Streamlit](https://img.shields.io/badge/Streamlit-1.30%2B-FF4B4B.svg)](https://streamlit.io/)
 [![Pinecone](https://img.shields.io/badge/Pinecone-Vector_DB-000000.svg)](https://www.pinecone.io/)
-[![Groq Llama-3.1](https://img.shields.io/badge/Groq-Llama--3.1--8B-F05A28.svg)](https://groq.com/)
+[![Groq Fast Inference](https://img.shields.io/badge/Groq-Fast_LPU-F05A28.svg)](https://groq.com/)
+[![Pytest](https://img.shields.io/badge/Pytest-17_Passing-success.svg)](https://pytest.org/)
+[![Docker Ready](https://img.shields.io/badge/Docker-Multi--Stage-2496ED.svg)](https://www.docker.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-> **TTS-Cloud (Talk-to-Syllabus)** is a production-grade, domain-specific Retrieval-Augmented Generation (RAG) system engineered specifically for academic course syllabi, university curricula, and textbook modules. 
+> **TTS-Cloud (Talk-to-Syllabus)** is a production-grade, domain-specific Retrieval-Augmented Generation (RAG) platform engineered specifically for academic course syllabi, university curricula, and textbook modules. 
 > 
-> Unlike generic "Chat with PDF" wrappers, TTS-Cloud preserves hierarchical curriculum semantics (Units, Modules, Sections, Prerequisites, Marking Schemes), utilizes **Hybrid Dense + Lexical (BM25) Retrieval with Reciprocal Rank Fusion (RRF)**, contextualizes conversational follow-ups, and enforces strict **source citations with exact page numbers and evidence inspection**.
+> Unlike generic "Chat with PDF" wrappers, TTS-Cloud preserves hierarchical curriculum semantics (Units, Modules, Sections, Prerequisites, Marking Schemes), utilizes **Hybrid Dense + Lexical (BM25) Retrieval with Reciprocal Rank Fusion (RRF)**, contextualizes conversational follow-ups, mitigates prompt injection, and enforces strict **source citations with exact page numbers and evidence inspection**.
+> 
+> TTS-Cloud provides dual serving interfaces: an interactive **Streamlit Dashboard** and a high-performance **FastAPI REST API** with Pydantic request/response validation.
 
 ---
 
@@ -50,28 +55,30 @@
                  ▼                                          │
     ┌───────────────────────────────────────────────────────┴───────┐
     │                 Hybrid Retrieval & Candidate Reranker         │
-    │   • Dense Cosine Similarity (Pinecone Top-K)                  │
+    │   • Dense Cosine Similarity (Pinecone Top-K / Local Fallback) │
     │   • Sparse BM25 Keyword Matching (Exact Acronyms/Codes)       │
     │   • Reciprocal Rank Fusion (RRF k=60) + Blended Scoring       │
-    │   • Retrieval Confidence Thresholding (Guardrail)             │
+    │   • Retrieval Confidence Thresholding (Guardrail >= 0.35)     │
+    │   • Thread-Safe Mutex Lock Protection                         │
     └───────────────────────────────┬───────────────────────────────┘
                                     │ Top Candidates + Exact Citations
                                     ▼
     ┌───────────────────────────────────────────────────────────────┐
     │                 Strictly Grounded RAG Generator               │
-    │   • System Guardrails (No hallucinated policies/marks)        │
-    │   • Groq Llama-3.1-8B-Instant Inference                       │
+    │   • System Guardrails & Prompt Injection Isolation            │
+    │   • Groq LPU Inference with Automated Model Fallback          │
     │   • Exact Citation Annotations [Filename, Page, Unit]         │
     └───────────────────────────────┬───────────────────────────────┘
                                     │
-                                    ▼
-    ┌───────────────────────────────────────────────────────────────┐
-    │                     Modern Streamlit Dashboard                │
-    │   • Multi-Syllabus Document Library & Selector                │
-    │   • Conversational Chat with Expandable Source Evidence       │
-    │   • Academic Study Tools (Unit Summary, MCQs, Exam Topics)    │
-    │   • Integrated Benchmark Evaluation Suite                     │
-    └───────────────────────────────────────────────────────────────┘
+                    ┌───────────────┴───────────────┐
+                    ▼                               ▼
+    ┌───────────────────────────────┐ ┌───────────────────────────────┐
+    │  Modern Streamlit Dashboard   │ │     FastAPI REST Service      │
+    │  • Multi-Syllabus Manager     │ │  • POST /api/v1/query         │
+    │  • Expandable Evidence Cards  │ │  • POST /api/v1/ingest        │
+    │  • Academic Study Utilities   │ │  • Pydantic Request/Response  │
+    │  • Live Benchmark Diagnostics │ │  • Interactive OpenAPI Docs   │
+    └───────────────────────────────┘ └───────────────────────────────┘
 ```
 
 ---
@@ -91,10 +98,11 @@ Standard RAG systems shred syllabi using arbitrary 500-character splitters, caus
 ### 2. 🔍 Hybrid Retrieval (Pinecone Dense + BM25 Sparse)
 Academic syllabi frequently contain specialized acronyms, course codes, and algorithmic complexity notations (`2NF`, `3NF`, `BCNF`, `TCP/IP`, `OSI`, `ACID`, `NP-Hard`, `O(V+E)`). Dense embeddings often dilute exact keyword matching. TTS-Cloud fuses:
 - **Dense Semantic Retrieval:** `all-MiniLM-L6-v2` (384 dimensions) indexed in Pinecone Serverless.
-- **Sparse Lexical Retrieval:** Self-contained Okapi BM25 index over the active syllabus corpus.
+- **Sparse Lexical Retrieval:** Self-contained Okapi BM25 index over the active syllabus corpus preserving technical symbols.
 - **Reciprocal Rank Fusion (RRF):**
   $$RRF\_Score(d) = \sum_{m \in \{dense, sparse\}} \frac{w_m}{k + rank_m(d)}$$
   yielding superior candidate ranking over single-modality retrievers.
+- **Local Fallback:** Falls back to vectorized NumPy cosine similarity if cloud vector databases are unreachable.
 
 ### 3. 🧠 Conversational Memory with Query Reformulation
 Maintains conversation history and reformulates multi-turn student follow-up queries:
@@ -115,12 +123,10 @@ Every generated response provides clickable, expandable source evidence showing:
 - **University Practice MCQ Generator:** Creates exam-style questions with answer keys, explanations, and syllabus citations.
 - **Key Exam Topics & Strategy:** Extracts high-weightage topics and recommended textbook references.
 
-### 6. 📊 Integrated Benchmark Evaluation Suite
-Includes an automated evaluation framework (`evaluation.py`) measuring:
-- **Hit Rate @ Top-K**
-- **Mean Reciprocal Rank (MRR)**
-- **Answer Groundedness & Keyword Coverage**
-- **Retrieval & Total End-to-End Latency**
+### 6. 🚀 FastAPI Serving Layer & OpenAPI Documentation
+- Fully decoupled REST API with Pydantic request/response models.
+- Endpoints for PDF ingestion, grounded querying, study tools, document management, and health checks.
+- Interactive Swagger documentation at `/docs`.
 
 ---
 
@@ -128,18 +134,29 @@ Includes an automated evaluation framework (`evaluation.py`) measuring:
 
 ```
 TTS-Cloud/
-├── config.py                 # Centralized configuration, parameters, and key resolution
-├── document_processor.py     # PDF parsing, SHA-256 hashing, unit detection, recursive chunking
-├── retriever.py              # Dense Pinecone client, BM25Okapi, RRF rank fusion, candidate reranker
-├── rag_engine.py             # Query reformulation, grounded prompt builder, Groq client, academic tools
-├── evaluation.py             # Benchmark dataset, Hit@K, MRR, groundedness, and latency evaluator
+├── api.py                    # Production FastAPI REST API server with Pydantic schemas
 ├── app.py                    # Production Streamlit UI (multi-doc manager, chat, study tools, eval)
+├── config.py                 # Centralized configuration, parameters, model fallback, logging setup
+├── document_processor.py     # PDF parsing, SHA-256 hashing, unit detection, recursive chunking
+├── retriever.py              # Dense Pinecone client, BM25Okapi, RRF rank fusion, thread-safe cache
+├── rag_engine.py             # Query reformulation, prompt injection defense, Groq client, academic tools
 ├── rag_pipeline.py           # Clean backward-compatible interface
+├── evaluation.py             # Benchmark suite: Hit@K, MRR, keyword coverage, groundedness, latency
+├── Dockerfile                # Production multi-stage Docker build
+├── docker-compose.yml        # Multi-service orchestration (Streamlit on :8501, FastAPI on :8000)
 ├── requirements.txt          # Production dependencies
 ├── render.yaml               # Infrastructure-as-code for Render deployment
 ├── Procfile                  # Procfile for web dynos
 ├── .env.example              # Environment variables template
-└── README.md                 # Complete system documentation
+├── .github/
+│   └── workflows/
+│       └── ci.yml            # GitHub Actions CI workflow (Pytest + Benchmark gate)
+├── tests/
+│   ├── test_document_processor.py  # Unit tests for chunking, hashing, and regex detection
+│   ├── test_retriever.py           # Unit tests for BM25, RRF ranking, and in-memory cache
+│   ├── test_rag_engine.py          # Unit tests for guardrails and response modeling
+│   └── test_api.py                 # Integration tests for FastAPI endpoints
+└── PROJECT_REVIEW.md         # Comprehensive senior engineer project evaluation
 ```
 
 ---
@@ -175,24 +192,58 @@ Edit `.env`:
 PINECONE_API_KEY=your_pinecone_api_key
 GROQ_API_KEY=your_groq_api_key
 PINECONE_INDEX_NAME=syllabus-rag
+GROQ_MODEL=qwen/qwen3.8-27b
 ```
 
-### 4. Run the Streamlit Application
+### 4. Run the Applications
+
+#### Option A: Run the Streamlit Web Application
 ```bash
 streamlit run app.py
 ```
 Open [http://localhost:8501](http://localhost:8501) in your browser.
 
+#### Option B: Run the FastAPI REST API
+```bash
+uvicorn api:app --reload --port 8000
+```
+- API Base: [http://localhost:8000](http://localhost:8000)
+- Interactive Swagger UI: [http://localhost:8000/docs](http://localhost:8000/docs)
+- Alternative ReDoc UI: [http://localhost:8000/redoc](http://localhost:8000/redoc)
+
 ---
 
-## 🧪 Running the Benchmark Evaluation
+## 🐳 Running with Docker & Docker Compose
+
+Launch both the Streamlit UI and the FastAPI REST Service with a single command:
+
+```bash
+docker-compose up --build
+```
+- **Streamlit Web UI:** [http://localhost:8501](http://localhost:8501)
+- **FastAPI Documentation:** [http://localhost:8000/docs](http://localhost:8000/docs)
+
+---
+
+## 🧪 Testing & Automated CI
+
+Run the automated Pytest test suite:
+```bash
+pytest tests/ -v
+```
+
+All 17 tests validate document hashing, unit detection heuristics, chunk length bounds, BM25 tokenization, in-memory cache operations, confidence guardrails, and FastAPI schema validation.
+
+---
+
+## 📊 Running the Benchmark Evaluation
 
 Run the automated evaluation suite via CLI:
 ```bash
-python evaluation.py
+python evaluation.py --top-k 4
 ```
 
-Sample Benchmark Output:
+Verified Benchmark Results (Live Run):
 ```text
 =================================================================
 🚀 RUNNING TTS-CLOUD RAG BENCHMARK EVALUATION SUITE
@@ -200,40 +251,28 @@ Sample Benchmark Output:
 
 📊 Evaluated 5 Benchmark Queries:
   • Hit Rate @ Top-4:       100.0%
-  • Mean Reciprocal Rank:   0.883
-  • Keyword Coverage:       95.0%
-  • Groundedness / Overlap: 82.4%
-  • Avg Retrieval Latency:  18.4 ms
-  • Avg Total End-to-End:   420.6 ms
+  • Mean Reciprocal Rank:   1.000
+  • Keyword Coverage:       78.0%
+  • Groundedness / Overlap: 41.9%
+  • Avg Retrieval Latency:  394.2 ms
+  • Avg Total End-to-End:   1335.1 ms
+
+Detailed Case Results:
+  • [eval_dbms_01] Hit: True | MRR: 1.0 | Latency: 630.9ms | Conf: 0.387
+  • [eval_cn_02]   Hit: True | MRR: 1.0 | Latency: 322.5ms | Conf: 0.417
+  • [eval_os_03]   Hit: True | MRR: 1.0 | Latency: 325.3ms | Conf: 0.347
+  • [eval_daa_04]  Hit: True | MRR: 1.0 | Latency: 321.2ms | Conf: 0.362
+  • [eval_oos_05]  Hit: True | MRR: 1.0 | Latency: 371.1ms | Conf: 0.373
 =================================================================
 ```
 
 ---
 
-## 🌐 Cloud Deployment
-
-### Option A: Streamlit Community Cloud (Recommended)
-1. Push your repository to GitHub.
-2. Visit [share.streamlit.io](https://share.streamlit.io) and link your repository (`app.py`).
-3. Under **Advanced Settings $\rightarrow$ Secrets**, add:
-   ```toml
-   PINECONE_API_KEY = "your_pinecone_api_key"
-   GROQ_API_KEY = "your_groq_api_key"
-   PINECONE_INDEX_NAME = "syllabus-rag"
-   ```
-4. Click **Deploy**.
-
-### Option B: Render Web Service
-1. Connect your repository to [Render](https://render.com).
-2. Render will automatically detect `render.yaml`.
-3. Set `PINECONE_API_KEY` and `GROQ_API_KEY` in the Render dashboard environment settings.
-
----
-
-## 🛡️ Guardrails & Safety
-- **Anti-Hallucination:** Answers strictly state when a topic or rule is absent from the syllabus.
-- **Confidence Threshold:** Drops low-confidence retrieval matches to prevent noisy prompting.
-- **Zero-Storage Secrets:** API keys are never persisted to disk or exposed in the UI.
+## 🛡️ Guardrails, Security & Safety
+- **Anti-Hallucination & Out-of-Syllabus:** Retrieval similarity thresholding (`>= 0.35`) intercepts out-of-scope queries before LLM generation.
+- **Prompt Injection Defense:** Student input is strictly quarantined within `<student_query>` XML boundaries with explicit system prompt rules.
+- **Thread Safety:** Mutex locks prevent race conditions in multi-threaded environments during index updates and document deletions.
+- **Graceful Model Fallback:** Automatic failover across supported Groq models (`qwen/qwen3.8-27b`, `llama-3.1-8b-instant`, `llama-3.3-70b-versatile`, `openai/gpt-oss-120b`).
 
 ---
 

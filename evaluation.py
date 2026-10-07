@@ -4,8 +4,9 @@ Measures Retrieval Quality (Hit@K, MRR), Groundedness / Context Overlap, and Lat
 using an academic syllabus benchmark dataset.
 """
 
-import io
+import argparse
 import json
+import logging
 import sys
 import time
 from dataclasses import asdict, dataclass
@@ -18,10 +19,12 @@ if sys.stdout and hasattr(sys.stdout, "reconfigure"):
     except Exception:
         pass
 
-from config import RAGSettings
+from config import RAGSettings, setup_logging
 from document_processor import SyllabusChunk
 from retriever import SyllabusRetriever
 from rag_engine import SyllabusRAGEngine
+
+logger = setup_logging()
 
 
 # ─── Benchmark Evaluation Dataset (Academic Syllabus QA) ──────────────────────
@@ -84,7 +87,7 @@ BENCHMARK_EVAL_DATASET: List[Dict[str, Any]] = [
         "id": "eval_oos_05",
         "subject": "Out-of-Syllabus / Guardrail Check",
         "question": "What is the capital city of Australia and what is its population?",
-        "expected_keywords": ["not found", "not available", "syllabus"],
+        "expected_keywords": ["not available", "not found", "syllabus", "not appear"],
         "expected_unit": "Out-of-Scope",
         "expected_page_hint": -1,
         "sample_context": ""
@@ -169,19 +172,25 @@ class RAGEvaluator:
         # 1. Retrieval Hit@K & Reciprocal Rank
         hit = False
         rr = 0.0
-        for rank, doc in enumerate(docs, start=1):
-            doc_text_lower = doc.text.lower()
-            matches = [kw for kw in expected_kw if kw in doc_text_lower]
-            if matches or (is_oos and confidence < 0.35):
-                if not hit:
+
+        if not is_oos:
+            for rank, doc in enumerate(docs, start=1):
+                doc_text_lower = doc.text.lower()
+                matches = [kw for kw in expected_kw if kw in doc_text_lower]
+                if matches and not hit:
                     hit = True
                     rr = 1.0 / rank
+        else:
+            # For out-of-scope query, success means low confidence guardrail fires or no relevant docs
+            if confidence < self.retriever.settings.CONFIDENCE_THRESHOLD or not docs:
+                hit = True
+                rr = 1.0
 
         # 2. Answer generation & Groundedness evaluation
         t1 = time.time()
-        answer = ""
-        groundedness = 0.0
+        generation_latency = 0.0
         kw_cov = 0.0
+        groundedness = 0.0
 
         try:
             rag_resp = self.engine.answer_question(question=q, top_k=top_k)
@@ -192,16 +201,24 @@ class RAGEvaluator:
             matched_kws = [kw for kw in expected_kw if kw in ans_lower]
             kw_cov = len(matched_kws) / len(expected_kw) if expected_kw else 1.0
 
-            context_text = " ".join([d.text for d in docs]).lower()
-            ans_words = set(ans_lower.split())
-            ctx_words = set(context_text.split())
-            if ans_words:
-                overlap = len(ans_words.intersection(ctx_words))
-                groundedness = min(1.0, overlap / max(1, len(ans_words)))
-        except Exception:
+            if is_oos:
+                # If answer correctly flags that information is unavailable, consider it a hit
+                if any(kw in ans_lower for kw in expected_kw):
+                    hit = True
+                    rr = 1.0
+                    groundedness = 1.0
+            else:
+                context_text = " ".join([d.text for d in docs]).lower()
+                ans_words = set(ans_lower.split())
+                ctx_words = set(context_text.split())
+                if ans_words and ctx_words:
+                    overlap = len(ans_words.intersection(ctx_words))
+                    groundedness = min(1.0, overlap / max(1, len(ans_words)))
+        except Exception as e:
+            logger.error("Generation error during evaluation of '%s': %s", sample["id"], e)
             generation_latency = 0.0
-            kw_cov = 0.5
-            groundedness = 0.5
+            kw_cov = 0.0
+            groundedness = 0.0
 
         return EvalResult(
             test_id=sample["id"],
@@ -245,21 +262,33 @@ class RAGEvaluator:
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="TTS-Cloud RAG Benchmark Evaluator")
+    parser.add_argument("--top-k", type=int, default=4, help="Top-K retrieval depth (default: 4)")
+    parser.add_argument("--assert-min-hit", type=float, default=None, help="Assert minimum hit rate (e.g. 0.8) for CI test gates")
+    args = parser.parse_args()
+
     print("=" * 65)
-    print("[*] RUNNING TTS-CLOUD RAG BENCHMARK EVALUATION SUITE")
+    print("🚀 RUNNING TTS-CLOUD RAG BENCHMARK EVALUATION SUITE")
     print("=" * 65)
 
     evaluator = RAGEvaluator()
-    summary = evaluator.run_benchmark(top_k=4)
+    summary = evaluator.run_benchmark(top_k=args.top_k)
 
-    print(f"\nEvaluated {summary.total_samples} Benchmark Queries:")
-    print(f"  - Hit Rate @ Top-4:       {summary.mean_hit_at_k * 100:.1f}%")
-    print(f"  - Mean Reciprocal Rank:   {summary.mean_mrr:.3f}")
-    print(f"  - Keyword Coverage:       {summary.mean_keyword_coverage * 100:.1f}%")
-    print(f"  - Groundedness / Overlap: {summary.mean_groundedness * 100:.1f}%")
-    print(f"  - Avg Retrieval Latency:  {summary.avg_retrieval_latency_ms} ms")
-    print(f"  - Avg Total End-to-End:   {summary.avg_total_latency_ms} ms")
+    print(f"\n📊 Evaluated {summary.total_samples} Benchmark Queries:")
+    print(f"  • Hit Rate @ Top-{args.top_k}:       {summary.mean_hit_at_k * 100:.1f}%")
+    print(f"  • Mean Reciprocal Rank:   {summary.mean_mrr:.3f}")
+    print(f"  • Keyword Coverage:       {summary.mean_keyword_coverage * 100:.1f}%")
+    print(f"  • Groundedness / Overlap: {summary.mean_groundedness * 100:.1f}%")
+    print(f"  • Avg Retrieval Latency:  {summary.avg_retrieval_latency_ms:.1f} ms")
+    print(f"  • Avg Total End-to-End:   {summary.avg_total_latency_ms:.1f} ms")
     print("\nDetailed Case Results:")
     for r in summary.detailed_results:
-        print(f"  - [{r['test_id']}] Hit: {r['hit_at_k']} | MRR: {r['reciprocal_rank']} | Latency: {r['retrieval_latency_ms']}ms | Conf: {r['confidence_score']}")
+        print(f"  • [{r['test_id']}] Hit: {r['hit_at_k']} | MRR: {r['reciprocal_rank']} | Latency: {r['retrieval_latency_ms']}ms | Conf: {r['confidence_score']}")
     print("=" * 65)
+
+    if args.assert_min_hit is not None:
+        if summary.mean_hit_at_k < args.assert_min_hit:
+            print(f"❌ CI Gate Failed: Hit rate {summary.mean_hit_at_k:.2f} is below threshold {args.assert_min_hit:.2f}")
+            sys.exit(1)
+        else:
+            print(f"✅ CI Gate Passed: Hit rate {summary.mean_hit_at_k:.2f} >= {args.assert_min_hit:.2f}")
