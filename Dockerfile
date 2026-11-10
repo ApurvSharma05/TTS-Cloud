@@ -14,7 +14,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY requirements.txt .
 
-RUN pip install --no-cache-dir --user -r requirements.txt
+# Install into /install (not --user) so the runtime stage can copy world-readable packages to /usr/local.
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
 # --- Stage 2: Final Minimal Runtime ---
 FROM python:3.11-slim AS runtime
@@ -26,9 +27,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy installed Python packages from builder
-COPY --from=builder /root/.local /root/.local
-ENV PATH=/root/.local/bin:$PATH
+# Copy installed Python packages from builder into the system prefix (readable by the non-root user,
+# and /usr/local/bin is already on PATH)
+COPY --from=builder /install /usr/local
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 

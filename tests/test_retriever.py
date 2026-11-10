@@ -3,6 +3,10 @@ test_retriever.py - Unit tests for custom BM25Okapi, Reciprocal Rank Fusion (RRF
 score blending, and local vector retrieval fallback.
 """
 
+import logging
+from types import SimpleNamespace
+
+import numpy as np
 import pytest
 from retriever import BM25Okapi, SyllabusRetriever, RetrievedDocument
 from document_processor import SyllabusChunk
@@ -84,3 +88,69 @@ def test_retriever_document_deletion():
 
     retriever.delete_document("to_delete_doc")
     assert not any(c["document_id"] == "to_delete_doc" for c in retriever._corpus_cache)
+
+
+class _FakePineconeIndex:
+    """Minimal stand-in for a Pinecone index: list(), fetch() and a query() that can fail."""
+
+    def __init__(self, chunks, fail_query=True):
+        embeddings = SyllabusRetriever.get_embedder().encode([c.text for c in chunks])
+        self.vectors = {
+            c.chunk_id: SimpleNamespace(id=c.chunk_id, values=emb.tolist(), metadata=c.to_metadata())
+            for c, emb in zip(chunks, embeddings)
+        }
+        self.fail_query = fail_query
+
+    def list(self):
+        yield SimpleNamespace(vectors=[SimpleNamespace(id=i) for i in self.vectors])
+
+    def fetch(self, ids):
+        return SimpleNamespace(vectors={i: self.vectors[i] for i in ids})
+
+    def query(self, **kwargs):
+        raise RuntimeError("pinecone offline")
+
+
+def _store_chunks():
+    return [
+        SyllabusChunk("h1", "doc_h", "DBMS.pdf", 14, "Third Normal Form functional dependency superkey.", "Unit 3", "3.3", 50),
+        SyllabusChunk("h2", "doc_h", "Networks.pdf", 22, "Transmission Control Protocol TCP handshake.", "Unit 4", "4.2", 45),
+    ]
+
+
+def test_cache_and_bm25_rebuilt_from_store_after_restart():
+    # Simulates a restarted process: empty cache, data only in the vector store
+    retriever = SyllabusRetriever(pinecone_api_key="test-key")
+    retriever._index = _FakePineconeIndex(_store_chunks())
+    assert retriever._corpus_cache == [] and retriever._bm25_model is None
+
+    assert retriever.ensure_hydrated() == 2
+    assert len(retriever._corpus_cache) == 2
+    assert retriever._corpus_embeddings.shape[0] == 2
+    assert retriever._bm25_model is not None
+    assert retriever.ensure_hydrated() == 0  # idempotent: does not load twice
+    assert len(retriever._corpus_cache) == 2
+
+
+def test_hydration_skips_chunks_already_cached():
+    retriever = SyllabusRetriever(pinecone_api_key="test-key")
+    chunks = _store_chunks()
+    retriever._index = _FakePineconeIndex(chunks)
+    # Pretend chunk h1 was already indexed in this process
+    retriever._corpus_cache = [chunks[0].to_metadata()]
+    retriever._corpus_embeddings = np.array([retriever._index.vectors["h1"].values], dtype=np.float32)
+    retriever._rebuild_bm25()
+
+    assert retriever.ensure_hydrated() == 1
+    assert sorted(c["chunk_id"] for c in retriever._corpus_cache) == ["h1", "h2"]
+
+
+def test_pinecone_query_failure_is_logged_and_falls_back_to_local(caplog):
+    retriever = SyllabusRetriever(pinecone_api_key="test-key")
+    retriever._index = _FakePineconeIndex(_store_chunks(), fail_query=True)
+
+    with caplog.at_level(logging.WARNING, logger="tts-cloud.retriever"):
+        docs, confidence = retriever.hybrid_search("functional dependency 3NF superkey", top_k=2)
+
+    assert any("Pinecone query failed" in r.getMessage() for r in caplog.records)
+    assert docs and docs[0].unit == "Unit 3"  # served from the rebuilt local cache

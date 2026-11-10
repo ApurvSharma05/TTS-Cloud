@@ -6,19 +6,33 @@ study tool generation, and health diagnostics with strict Pydantic validation.
 
 import logging
 import time
+from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
-from fastapi import FastAPI, File, HTTPException, UploadFile, status
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from config import RAGSettings, get_api_keys, setup_logging
+from config import RAGSettings, get_api_keys, get_cors_config, get_max_upload_bytes, setup_logging
 from document_processor import process_pdf_into_chunks
 from retriever import SyllabusRetriever
 from rag_engine import SyllabusRAGEngine, RAGResponse
 
 logger = setup_logging()
 
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Reload the in-memory cache and BM25 index from Pinecone so a restart does not lose lexical search."""
+    try:
+        loaded = _retriever.ensure_hydrated()
+        logger.info("Startup hydration finished (%d chunks loaded from the vector store).", loaded)
+    except Exception as e:
+        logger.warning("Startup hydration failed (%s); it will be retried on the next search.", e)
+    yield
+
+
 app = FastAPI(
+    lifespan=lifespan,
     title="TTS-Cloud API (Talk-to-Syllabus)",
     description=(
         "Production-grade, domain-specific Retrieval-Augmented Generation (RAG) API "
@@ -29,11 +43,36 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
-# Configure CORS
+# Multipart framing adds a little overhead on top of the file itself.
+_MULTIPART_OVERHEAD_BYTES = 64 * 1024
+
+
+def _upload_too_large(limit: int) -> JSONResponse:
+    return JSONResponse(
+        status_code=413,
+        content={"detail": f"File too large. Maximum upload size is {limit} bytes (MAX_UPLOAD_MB)."},
+    )
+
+
+@app.middleware("http")
+async def limit_ingest_body_size(request: Request, call_next):
+    """Reject oversized ingest requests from Content-Length before the body is parsed.
+    Chunked uploads without Content-Length are checked in the endpoint instead."""
+    if request.method == "POST" and request.url.path == "/api/v1/ingest":
+        limit = get_max_upload_bytes()
+        content_length = request.headers.get("content-length")
+        if content_length and content_length.isdigit() and int(content_length) > limit + _MULTIPART_OVERHEAD_BYTES:
+            return _upload_too_large(limit)
+    return await call_next(request)
+
+
+# Configure CORS (added after the size middleware so it is the outermost layer and also decorates 413s).
+# Origins come from CORS_ALLOW_ORIGINS; credentials are never combined with the "*" wildcard.
+_cors_origins, _cors_credentials = get_cors_config()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_cors_origins,
+    allow_credentials=_cors_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -41,6 +80,7 @@ app.add_middleware(
 # Shared singleton instances
 _retriever = SyllabusRetriever()
 _engine = SyllabusRAGEngine(retriever=_retriever)
+
 
 
 # ─── Pydantic Request & Response Schemas ─────────────────────────────────────
@@ -156,8 +196,14 @@ async def ingest_syllabus_pdf(file: UploadFile = File(...)):
             detail="Invalid file type. Only PDF (.pdf) documents are accepted."
         )
 
+    limit = get_max_upload_bytes()
+    if file.size is not None and file.size > limit:
+        return _upload_too_large(limit)
+
     try:
-        pdf_bytes = await file.read()
+        pdf_bytes = await file.read(limit + 1)
+        if len(pdf_bytes) > limit:
+            return _upload_too_large(limit)
         if len(pdf_bytes) == 0:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded file is empty (0 bytes).")
 
@@ -173,6 +219,8 @@ async def ingest_syllabus_pdf(file: UploadFile = File(...)):
             detected_units=distinct_units,
             message=f"Successfully indexed {num_indexed} chunks from '{file.filename}'."
         )
+    except HTTPException:
+        raise
     except ValueError as ve:
         logger.warning("PDF Ingestion validation error: %s", ve)
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))

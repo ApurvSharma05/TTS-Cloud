@@ -107,7 +107,8 @@ class SyllabusRetriever:
     def __init__(self, pinecone_api_key: Optional[str] = None, index_name: Optional[str] = None):
         self.settings = RAGSettings()
         key, _, default_idx = get_api_keys()
-        self.api_key = pinecone_api_key or key
+        # An explicit "" disables Pinecone (in-memory mode); None falls back to the environment key.
+        self.api_key = pinecone_api_key if pinecone_api_key is not None else key
         self.index_name = index_name or default_idx
         self._pinecone_client = None
         self._index = None
@@ -115,6 +116,8 @@ class SyllabusRetriever:
         self._corpus_cache: List[Dict[str, Any]] = []
         self._corpus_embeddings: Optional[np.ndarray] = None
         self._bm25_model: Optional[BM25Okapi] = None
+        self._hydrated = False
+        self._hydrate_retry_after = 0.0
 
     @classmethod
     def get_embedder(cls) -> SentenceTransformer:
@@ -201,6 +204,54 @@ class SyllabusRetriever:
 
         return len(chunks)
 
+    def ensure_hydrated(self) -> int:
+        """
+        Rebuild the in-memory cache, embeddings and BM25 index from Pinecone (once per process).
+        Call at startup or lazily before the first search so a restart does not lose lexical search.
+        Chunks already cached (same chunk_id) are skipped. If Pinecone is unreachable the attempt is
+        retried after 60 s. Returns the number of chunks loaded. Loads the whole index into RAM, so it
+        suits small/medium corpora only.
+        """
+        if self._hydrated or not self.api_key or time.time() < self._hydrate_retry_after:
+            return 0
+        try:
+            loaded = self._load_corpus_from_store()
+            self._hydrated = True
+            return loaded
+        except Exception as e:
+            self._hydrate_retry_after = time.time() + 60
+            logger.warning("Could not rebuild cache from Pinecone (%s); will retry later.", e)
+            return 0
+
+    def _load_corpus_from_store(self, fetch_batch_size: int = 100) -> int:
+        index = self._get_pinecone_index()
+        loaded_meta: List[Dict[str, Any]] = []
+        loaded_vecs: List[List[float]] = []
+        for page in index.list():
+            ids = list(page) if isinstance(page, (list, tuple)) else [v.id for v in page.vectors]
+            for b in range(0, len(ids), fetch_batch_size):
+                fetched = index.fetch(ids=ids[b:b + fetch_batch_size])
+                for vec in fetched.vectors.values():
+                    meta = dict(vec.metadata or {})
+                    if not meta.get("text") or not vec.values:
+                        continue
+                    meta.setdefault("chunk_id", vec.id)
+                    loaded_meta.append(meta)
+                    loaded_vecs.append(list(vec.values))
+
+        with self._lock:
+            known = {c.get("chunk_id") for c in self._corpus_cache}
+            keep = [i for i, m in enumerate(loaded_meta) if m.get("chunk_id") not in known]
+            if keep:
+                new_emb = np.array([loaded_vecs[i] for i in keep], dtype=np.float32)
+                self._corpus_cache = self._corpus_cache + [loaded_meta[i] for i in keep]
+                self._corpus_embeddings = (
+                    new_emb if self._corpus_embeddings is None else np.vstack([self._corpus_embeddings, new_emb])
+                )
+                self._rebuild_bm25()
+        logger.info("Rebuilt local cache and BM25 index from Pinecone: %d chunks.", len(keep))
+        return len(keep)
+
     def _rebuild_bm25(self):
         """Reconstruct the in-memory BM25 index from active corpus."""
         if not self._corpus_cache:
@@ -250,11 +301,20 @@ class SyllabusRetriever:
         1. Dense semantic search via Pinecone (or local vector cosine fallback).
         2. Sparse lexical search via BM25Okapi.
         3. Reciprocal Rank Fusion (RRF) & Relevance blending.
-        4. Guardrail filtering & confidence score calculation.
+        4. Confidence score (blended score of the best chunk).
 
         Returns:
-            (list_of_reranked_docs, overall_confidence_score)
+            (list_of_reranked_docs, best_chunk_blended_score)
         """
+        self.ensure_hydrated()
+
+        # Snapshot shared state under the lock (writers replace/append, so copy the list); the rest of the
+        # search then works on a consistent view without holding the lock during embedding or network calls.
+        with self._lock:
+            corpus_cache = list(self._corpus_cache)
+            corpus_embeddings = self._corpus_embeddings
+            bm25_model = self._bm25_model
+
         embedder = self.get_embedder()
         q_emb = embedder.encode([query])[0]
         q_emb_list = q_emb.tolist()
@@ -283,21 +343,22 @@ class SyllabusRetriever:
                         "metadata": meta
                     }
                 pinecone_success = True
-            except Exception:
+            except Exception as e:
+                logger.warning("Pinecone query failed (%s); falling back to local cosine search.", e)
                 pinecone_success = False
 
         # Fallback to local cosine similarity if Pinecone returned nothing or offline
-        if not pinecone_success and self._corpus_cache and self._corpus_embeddings is not None:
+        if not pinecone_success and corpus_cache and corpus_embeddings is not None:
             # Cosine similarity calculation: (A . B) / (||A|| * ||B||)
             norm_q = np.linalg.norm(q_emb)
             if norm_q > 0:
-                norms_docs = np.linalg.norm(self._corpus_embeddings, axis=1)
+                norms_docs = np.linalg.norm(corpus_embeddings, axis=1)
                 norms_docs[norms_docs == 0] = 1e-10
-                sims = np.dot(self._corpus_embeddings, q_emb) / (norms_docs * norm_q)
+                sims = np.dot(corpus_embeddings, q_emb) / (norms_docs * norm_q)
                 
                 ranked_indices = np.argsort(sims)[::-1]
                 for rank, idx in enumerate(ranked_indices[:candidate_pool_size]):
-                    meta = self._corpus_cache[idx]
+                    meta = corpus_cache[idx]
                     if document_filter and meta.get("document_id") != document_filter:
                         continue
                     cid = meta.get("chunk_id", f"chunk_{idx}")
@@ -310,11 +371,11 @@ class SyllabusRetriever:
         # Step 2: Sparse BM25 Retrieval
         sparse_scores: Dict[str, float] = {}
         sparse_ranks: Dict[str, int] = {}
-        if self._bm25_model and self._corpus_cache:
-            bm_scores = self._bm25_model.get_scores(query)
+        if bm25_model and corpus_cache:
+            bm_scores = bm25_model.get_scores(query)
             ranked_bm = sorted(
-                [(self._corpus_cache[i].get("chunk_id", f"chunk_{i}"), bm_scores[i], self._corpus_cache[i])
-                 for i in range(len(self._corpus_cache))],
+                [(corpus_cache[i].get("chunk_id", f"chunk_{i}"), bm_scores[i], corpus_cache[i])
+                 for i in range(len(corpus_cache))],
                 key=lambda x: x[1],
                 reverse=True
             )
@@ -366,9 +427,8 @@ class SyllabusRetriever:
         fused_candidates.sort(key=lambda d: (d.score, d.rrf_score), reverse=True)
         top_candidates = fused_candidates[:top_k]
 
-        overall_confidence = (
-            sum(d.score for d in top_candidates) / len(top_candidates)
-            if top_candidates else 0.0
-        )
+        # Confidence = blended score of the best chunk (a mean over top-k is dragged down by weak tail chunks
+        # even when the top hit is a perfect match).
+        overall_confidence = top_candidates[0].score if top_candidates else 0.0
 
         return top_candidates, round(overall_confidence, 4)

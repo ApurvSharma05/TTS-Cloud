@@ -58,7 +58,7 @@
     │   • Dense Cosine Similarity (Pinecone Top-K / Local Fallback) │
     │   • Sparse BM25 Keyword Matching (Exact Acronyms/Codes)       │
     │   • Reciprocal Rank Fusion (RRF k=60) + Blended Scoring       │
-    │   • Retrieval Confidence Thresholding (Guardrail >= 0.35)     │
+    │   • Confidence Guardrail (best chunk score >= 0.35)             │
     │   • Thread-Safe Mutex Lock Protection                         │
     └───────────────────────────────┬───────────────────────────────┘
                                     │ Top Candidates + Exact Citations
@@ -232,7 +232,7 @@ Run the automated Pytest test suite:
 pytest tests/ -v
 ```
 
-All 17 tests validate document hashing, unit detection heuristics, chunk length bounds, BM25 tokenization, in-memory cache operations, confidence guardrails, and FastAPI schema validation.
+All 27 tests validate document hashing, unit detection heuristics, chunk length bounds, BM25 tokenization, in-memory cache operations, confidence guardrails (low-confidence answers skip the LLM), cache rebuild from Pinecone, upload size limit (413), CORS config, and FastAPI schema validation.
 
 ---
 
@@ -243,7 +243,7 @@ Run the automated evaluation suite via CLI:
 python evaluation.py --top-k 4
 ```
 
-Verified Benchmark Results (Live Run):
+Benchmark results from an earlier live run (before the guardrail change; the `Conf` column then used the mean of the top-4 scores, now it is the best chunk's score; not re-run since):
 ```text
 =================================================================
 🚀 RUNNING TTS-CLOUD RAG BENCHMARK EVALUATION SUITE
@@ -269,7 +269,9 @@ Detailed Case Results:
 ---
 
 ## 🛡️ Guardrails, Security & Safety
-- **Anti-Hallucination & Out-of-Syllabus:** Retrieval similarity thresholding (`>= 0.35`) intercepts out-of-scope queries before LLM generation.
+- **Anti-Hallucination & Out-of-Syllabus:** If the best retrieved chunk scores below `CONFIDENCE_THRESHOLD` (default `0.35`, blended 0.7 dense + 0.3 BM25) or nothing is retrieved, the engine returns a canned "not found in the syllabus" message and does not call the LLM. The threshold is not calibrated on real syllabi; tune it for your documents.
+- **Upload & CORS limits (REST API):** `MAX_UPLOAD_MB` (default 20) caps PDF uploads (HTTP 413). `CORS_ALLOW_ORIGINS` lists allowed origins (default: local Streamlit UI); credentials are never enabled together with `*`.
+- **Restart recovery:** On API startup (and lazily on first search) the in-memory cache and BM25 index are rebuilt from Pinecone. This loads the whole index into RAM, so it suits small to medium corpora.
 - **Prompt Injection Defense:** Student input is strictly quarantined within `<student_query>` XML boundaries with explicit system prompt rules.
 - **Thread Safety:** Mutex locks prevent race conditions in multi-threaded environments during index updates and document deletions.
 - **Graceful Model Fallback:** Automatic failover across supported Groq models (`qwen/qwen3.8-27b`, `llama-3.1-8b-instant`, `llama-3.3-70b-versatile`, `openai/gpt-oss-120b`).
