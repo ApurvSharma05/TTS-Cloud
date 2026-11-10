@@ -167,7 +167,7 @@ class SyllabusRAGEngine:
         Full RAG pipeline:
         1. Contextualize query with conversation memory.
         2. Hybrid retrieve top candidates from Pinecone + BM25 with RRF.
-        3. Apply confidence guardrails.
+        3. Apply the confidence guardrail (best-chunk score < threshold -> canned fallback, no LLM call).
         4. Generate grounded answer with precise page and unit citations.
         """
         start_time = time.time()
@@ -227,9 +227,14 @@ class SyllabusRAGEngine:
             f"Provide a clear, grounded academic answer with explicit source citations:"
         )
 
-        # If completely empty context or zero confidence
-        if is_low_confidence and not docs:
-            logger.info("Low confidence (%s) and zero docs returned. Triggering anti-hallucination guardrail.", confidence)
+        # Guardrail: no usable context (no chunks, or best chunk scores below CONFIDENCE_THRESHOLD)
+        # -> return the canned fallback and do NOT call the LLM.
+        if is_low_confidence:
+            logger.info(
+                "Low confidence (best score %s < %s, %d docs). Returning fallback without calling the LLM.",
+                confidence, self.settings.CONFIDENCE_THRESHOLD, len(docs)
+            )
+            citations = []  # weak chunks are not evidence for a refusal
             answer = (
                 "⚠️ **No matching information found in the syllabus.**\n\n"
                 "The question asked does not appear to match any topics, units, or policies in the uploaded syllabus PDF. "
