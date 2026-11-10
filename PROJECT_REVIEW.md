@@ -766,7 +766,7 @@ The low-confidence guardrail, cache and BM25 rebuild after restart, upload size 
 | **Cross-Encoder Neural Reranking** | Replaces linear score blending with calibrated neural reranker (e.g. `bge-reranker-base`). | **M** | 🟡 **Med** |
 | **Layout-Aware PDF Ingestion (OCR)** | Handles complex table curricula and scanned image PDFs using layout analysis. | **L** | 🟡 **Med** |
 | **Continuous Evaluation with Ragas** | Upgrades lexical overlap to LLM-as-a-judge metrics (Faithfulness, Answer Relevance). | **M** | 🟡 **Med** |
-| **Anthropic Model Context Protocol (MCP)** | Exposes syllabus search and study tools as an MCP tool for Claude Desktop / Agent platforms. | **M** | 🟢 **Low** |
+| **Model Context Protocol (MCP)** | Exposes syllabus search and study tools as MCP tools for LLM agent platforms. | **M** | 🟢 **Low** |
 
 ---
 
